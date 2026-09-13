@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       usd_ref:
-        description: 'OpenUSD ref (branch, tag, or SHA) to build'
+        description: 'OpenUSD ref (branch, tag, or SHA)'
         default: 'release'
       release_tag:
-        description: 'Tag for the GitHub Release that receives the wheels (e.g. 26.8-arm64-linux)'
+        description: 'GitHub Release tag for the wheels (e.g. 26.8-arm64-linux)'
         required: true
 
 permissions:
@@ -17,67 +17,78 @@ jobs:
   build:
     runs-on: ubuntu-24.04-arm
     strategy:
+      fail-fast: false
       matrix:
         python:
           - tag: cp312
             interpreter: /opt/python/cp312-cp312/bin/python
-            version: '3.12'
           - tag: cp313
             interpreter: /opt/python/cp313-cp313/bin/python
-            version: '3.13'
           - tag: cp314
             interpreter: /opt/python/cp314-cp314/bin/python
-            version: '3.14'
-    timeout-minutes: 90
+    timeout-minutes: 120
+    container:
+      image: quay.io/pypa/manylinux_2_28_aarch64:latest
     steps:
+      - name: Install cmake
+        run: |
+          ${{ matrix.python.interpreter }} -m pip install --upgrade pip
+          ${{ matrix.python.interpreter }} -m pip install cmake setuptools wheel auditwheel
+
       - name: Checkout OpenUSD
         uses: actions/checkout@v4
         with:
           repository: PixarAnimationStudios/OpenUSD
           ref: ${{ github.event.inputs.usd_ref }}
+          path: OpenUSD
 
-      - name: Build the manylinux_2_28_aarch64 image (upstream Dockerfile + cmake)
-        run: docker build -t manylinuxwithcmake --build-arg BASE=quay.io/pypa/manylinux_2_28_aarch64 build_scripts/pypi/docker
-
-      - name: Start the build container
+      - name: FindPython stub library workaround
+        working-directory: OpenUSD
         run: |
-          mkdir -p "$HOME/dist"
-          docker run --name usdmanylinux --rm -id \
-            -v "$PWD":/opt/USD \
-            -v "$HOME/dist":/opt/USD-dist \
-            manylinuxwithcmake
+          ${{ matrix.python.interpreter }} -c "import pathlib,sysconfig; pathlib.Path(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')).touch()"
 
-      - name: Install python build deps in the container
+      - name: Build USD (monolithic, python bindings only)
+        working-directory: OpenUSD
         run: |
-          docker exec usdmanylinux ${{ matrix.python.interpreter }} -m pip install setuptools wheel
-
-      - name: Work around FindPython requiring a library file
-        run: |
-          docker exec usdmanylinux ${{ matrix.python.interpreter }} -c \
-            "import pathlib,sysconfig; pathlib.Path(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')).touch()"
-
-      - name: Build USD
-        run: |
-          docker exec usdmanylinux bash -lc "
-            cd /opt/USD &&
-            ${{ matrix.python.interpreter }} build_scripts/build_usd.py --build-monolithic --no-imaging --no-materialx --no-usdview --python-build /opt/USD/build --install /opt/USD/install
-          "
+          ${{ matrix.python.interpreter }} build_scripts/build_usd.py \
+            --build-monolithic \
+            --no-imaging --no-materialx --no-usdview --no-tools --no-examples --no-tutorials \
+            --no-tests --no-docs \
+            $PWD/inst
 
       - name: Package wheel
+        working-directory: OpenUSD/build_scripts/pypi
         run: |
-          docker exec usdmanylinux bash -lc "
-            cd /opt/USD/build_scripts/pypi &&
-            ${{ matrix.python.interpreter }} setup.py bdist_wheel --python-tag ${{ matrix.python.tag }} --plat-name manylinux_2_28_aarch64 --dist-dir /opt/USD-dist
-          "
+          ${{ matrix.python.interpreter }} setup.py bdist_wheel \
+            --python-tag ${{ matrix.python.tag }} \
+            --plat-name manylinux_2_28_aarch64 \
+            --dist-dir $GITHUB_WORKSPACE/dist-raw
 
-      - name: Repair wheel with auditwheel
+      - name: Repair with auditwheel
         run: |
-          docker exec usdmanylinux bash -lc "
-            /opt/python/cp312-cp312/bin/python -m pip install auditwheel &&
-            /opt/python/cp312-cp312/bin/python -m auditwheel repair --plat manylinux_2_28_aarch64 /opt/USD-dist/*.whl -w /opt/USD-dist/repaired
-          "
+          mkdir -p dist
+          ${{ matrix.python.interpreter }} -m auditwheel repair \
+            --plat manylinux_2_28_aarch64 \
+            -w dist \
+            dist-raw/*.whl
 
-      - name: Upload wheels to the release
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: usd-core-${{ matrix.python.tag }}-aarch64
+          path: dist/*.whl
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.release_tag }}
@@ -86,8 +97,4 @@ jobs:
             || gh release create "$TAG" --repo "${{ github.repository }}" \
                  --title "$TAG" \
                  --notes "usd-core wheels built from PixarAnimationStudios/OpenUSD@${{ github.event.inputs.usd_ref }} for manylinux_2_28_aarch64."
-          gh release upload "$TAG" "$HOME/dist/repaired"/*.whl --repo "${{ github.repository }}" --clobber
-
-      - name: Stop container
-        if: always()
-        run: docker stop usdmanylinux || true
+          gh release upload "$TAG" dist/*.whl --repo "${{ github.repository }}" --clobber
