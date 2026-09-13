@@ -30,10 +30,10 @@ jobs:
     container:
       image: quay.io/pypa/manylinux_2_28_aarch64:latest
     steps:
-      - name: Install cmake
+      - name: Install python build deps + cmake
         run: |
           ${{ matrix.python.interpreter }} -m pip install --upgrade pip
-          ${{ matrix.python.interpreter }} -m pip install cmake setuptools wheel auditwheel
+          ${{ matrix.python.interpreter }} -m pip install cmake setuptools wheel auditwheel jinja2
 
       - name: Checkout OpenUSD
         uses: actions/checkout@v4
@@ -47,32 +47,50 @@ jobs:
         run: |
           ${{ matrix.python.interpreter }} -c "import pathlib,sysconfig; pathlib.Path(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')).touch()"
 
-      - name: Build USD (monolithic, python bindings only)
+      - name: Build USD (upstream flags)
         working-directory: OpenUSD
         run: |
           ${{ matrix.python.interpreter }} build_scripts/build_usd.py \
             --build-monolithic \
-            --no-imaging --no-materialx --no-usdview --no-tools --no-examples --no-tutorials \
-            --no-tests --no-docs \
-            $PWD/inst
+            --build-args USD,"-DPXR_PY_UNDEFINED_DYNAMIC_LOOKUP=ON -DPXR_BUILD_USD_TOOLS=OFF -DPXR_BUILD_EXEC=OFF -DPXR_INSTALL_LOCATION=../pxr/pluginfo -DPXR_PYTHON_INSTALL_DIR=lib/python" \
+            --no-materialx --no-imaging --no-examples --no-tutorials \
+            --build $PWD/gen/build --src $PWD/gen/src \
+            $PWD/inst \
+            -v
 
-      - name: Package wheel
-        working-directory: OpenUSD/build_scripts/pypi
+      - name: Assemble packaging directory
+        working-directory: OpenUSD
         run: |
-          ${{ matrix.python.interpreter }} setup.py bdist_wheel \
-            --python-tag ${{ matrix.python.tag }} \
-            --plat-name manylinux_2_28_aarch64 \
-            --dist-dir $GITHUB_WORKSPACE/dist-raw
+          mkdir packaging
+          cp -R inst packaging/inst
+          cp build_scripts/pypi/package_files/* packaging/
+          cp LICENSE.txt packaging/
 
-      - name: Repair with auditwheel
+      - name: Run setup.py bdist_wheel
+        working-directory: OpenUSD/packaging
         run: |
-          mkdir -p dist
+          ${{ matrix.python.interpreter }} setup.py bdist_wheel --python-tag ${{ matrix.python.tag }}
+
+      - name: auditwheel repair
+        working-directory: OpenUSD
+        run: |
+          PYTHONPATH=$PWD/packaging/pypi/lib/python \
+          LD_LIBRARY_PATH=$PWD/packaging/pypi/lib \
           ${{ matrix.python.interpreter }} -m auditwheel repair \
             --plat manylinux_2_28_aarch64 \
-            -w dist \
-            dist-raw/*.whl
+            -w wheelhouse \
+            packaging/dist/*.whl
 
-      - name: Upload artifacts
+      - name: updatePluginfos
+        working-directory: OpenUSD
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/dist
+          WHEEL=$(ls wheelhouse | head -1)
+          ${{ matrix.python.interpreter }} build_scripts/pypi/updatePluginfos.py \
+            "wheelhouse/$WHEEL" \
+            "$GITHUB_WORKSPACE/dist/$WHEEL"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: usd-core-${{ matrix.python.tag }}-aarch64
