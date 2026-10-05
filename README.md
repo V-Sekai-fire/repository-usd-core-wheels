@@ -1,14 +1,14 @@
 # repository-usd-core-wheels
 
-OpenUSD Python wheels built for platforms the package index ships none for, published as release assets.
+OpenUSD Python wheels for Linux on 64-bit ARM, where the package index ships none, published as release assets.
 
 ## What it is for
 
-The published usd-core package has no wheel for some platforms and no source distribution to build one from. This repository holds only the recipe that builds the missing wheels from the upstream OpenUSD source, and a pixi environment names the resulting release asset by URL.
+The published usd-core package has no wheel for Linux on 64-bit ARM and no source distribution to build one from. This repository holds only the recipe that builds that wheel from the upstream OpenUSD source. Consumers reference the wheel by its release-asset URL.
 
 ## Build and run
 
-Dispatch the build workflow with an OpenUSD ref and a release tag. It builds inside the upstream manylinux image and uploads the repaired wheels to that release.
+Dispatch the build workflow with an OpenUSD ref and a release tag. It builds inside the manylinux image and uploads the repaired wheels to that release.
 
 ## Licence
 
