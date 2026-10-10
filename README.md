@@ -12,4 +12,4 @@ Dispatch the build workflow with an OpenUSD ref and a release tag. It builds ins
 
 ## Licence
 
-This repository states no licence of its own. The wheels it builds carry OpenUSD's licence.
+MIT. See [LICENSE](LICENSE).
